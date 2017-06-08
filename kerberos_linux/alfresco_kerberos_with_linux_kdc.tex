@@ -1,0 +1,1123 @@
+\documentclass[12pt,a4]{article}
+% \usepackage{draftwatermark}
+\usepackage{background}
+\usepackage{color}   %May be necessary if you want to color links
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true, %set true if you want colored links
+    linktoc=all,     %set to all if you want both sections and subsections linked
+    linkcolor=blue,  %choose some color if you want links to stand out
+}
+\textwidth 170 mm
+\oddsidemargin -8 mm
+\evensidemargin -8 mm
+%\SetWatermarkScale{3.0}
+\SetBgColor{red}
+\SetBgOpacity{0.1}
+\SetBgScale{10}
+%\SetBgContents{\hspace{9mm}DRAFT \hspace{0mm}\vspace{2mm} \includegraphics[width=5mm]{Alfresco_logo_CMYK_white}} 
+
+\begin{document}
+\begin{center}
+{\huge Alfresco Kerberos with a Linux KDC}
+
+\vspace{5mm}
+
+\Large{Alfresco Kerberos Authentication with a Linux MIT KDC with openlap backend}
+
+\vspace{5mm}
+{\bf Alex Madon}
+\vspace{5mm}
+
+\today
+
+\vspace{15mm}
+{\huge To be reviewed}
+
+\end{center}
+\vspace{5mm}
+
+\newpage
+
+\tableofcontents
+
+\newpage
+
+\section{Introduction}
+Kerberos is an authentication protocol designed by the MIT. The protocol is based on Needham–Schroeder Symmetric Key Protocol. Kerberos is:
+\begin{itemize}
+\item is secure: Kerberos never transmits passwords over the network in the clear. Kerberos protocol messages are protected against eavesdropping and replay attacks.
+\item requires a trusted third party: all authentication requests are routed through the centralized Kerberos server, the KDC (Key Distribution Center)
+\item provides mutual authentication: both the user and the server verify each other's identity. 
+\end{itemize}
+Microsoft adopted of the latest Kerberos protocol as the preferred authentication mechanism in its Active Directory.
+Alfresco has been supporting kerberos authentication for many years but only when the KDC is Microsoft Active Directory.
+
+Some partners have asked for kerberos solutions that do not require Windows. So far, the answer was, this is not officially supported but it may work.
+The purpose of this document is to document clearly the steps that need to be done  to obtain kerberos authentication in Alfresco using MIT Kerberos server with an openldap backend.
+{\bf Alfresco kerberos authenticaton using a Linux KDC is still not officially supported.}
+
+\section{General overview}
+Microsoft Active Directory (AD) is the Marketing name for a Microsoft product that in fact provides several services.
+In the UNIX world, where the design philosophy is ``do one thing but do it well'', we are nnot surprised to see that to replace AD, we need to install several servers.
+\begin{itemize}
+\item Active Directory is a Kerberos server (KDC); It listems on port 88 UDP and TCP. In the linux world, there are two well known implementations providing the kerberos servbioce: MIT kerberos and Heimdal kerberos.  In this article we show how to use MIT kerberos.
+\item Active Directory is a LDAP server; It listens on port 389. In the linux world, there are several implementations of the LDAP service, but the most widely used is OpenLdap. In this artile we show how to use OpenLdap to provide to back our KDC.
+\item Active Directory can also be a DNS server; It listens on port 53 UDAP and TCP. Linux has many implementations of the DNS service; Bind is probably the most famous. In this paper however, we assume every client knows where to find the KDC via the client's /etc/krb5.conf file, and thus that DNS based service discovery using the SRV DNS requests is not necessary. We hence will not have to install a DNS server.
+{\tt \_kerberos.\_udp. DnsDomainName}. \cite{dnssrv}
+\end{itemize}
+We try to make the linux configuration as close as possible to the Microsot AD configuration. For instance, the branch where we store users is:
+
+\begin{verbatim}
+cn=Users,dc=example,dc=foo"
+\end{verbatim}
+
+\section{Note on security}
+The configuration we describe is aimed at creating a test/QA setup.
+Simpler but less secure protocols are sometimes chosen. For instance, for the communication between the KDC and the openldap backedn we use the ldap protocol because it is easier to setup than the ldaps protocl (no need of SSL certifcate), and easier to debug than ldapi. Indeed we can listen to the loopback interface to 'see' all the ldap traffic exchanged between the KDC and the openldap backend.  In a production setup, ldaps is recommnended, if the server or ldapi if the KDC and the openldap server are both on the same machine.
+
+We do not present solution to avoid Single Point of Failure (SPOF). In a production environment, you probably want to replicate the KDC data to a second server.
+\section{Architecture}
+
+\begin{itemize}
+\item A debian server (wheezy) at IP 10.69.69.200 which is a KDC running MIT Kerberos and openldap
+\item A debian server IP 10.69.69.1 which is the Alfresco server. The server name is 'madona'.
+\item A linux client running Mozilla firefox
+\end{itemize}
+In my tests I used Alfresco version 4.1.2.
+Our kerberos REALM will be EXAMPLE.FOO.
+
+\section{For the impatient}
+In this section the list of operations to do to get kerberos authentication with a Linux KDC. This section is aimed to be as short as possible; we hence do not provide much explanations; we do not discuss what is done. In the next sections, we come back to each of those teps to discuss them in more depth.
+\begin{enumerate}
+
+\item Install the openldap program:
+\begin{verbatim}
+apt-get install slapd
+dpkg-reconfigure slapd
+\end{verbatim}
+and answer the domain and password questions with:
+\begin{verbatim}
+example.foo
+mypass
+\end{verbatim}
+respectively.
+\item {Modify the openldap schema}
+\begin{verbatim}
+apt-get install krb5-kdc-ldap
+zcat /usr/share/doc/krb5-kdc-ldap/kerberos.schema.gz \
+ > /etc/ldap/schema/kerberos.schema
+echo "
+include          /etc/ldap/schema/core.schema
+include          /etc/ldap/schema/cosine.schema
+include          /etc/ldap/schema/nis.schema
+include          /etc/ldap/schema/inetorgperson.schema
+include          /etc/ldap/schema/kerberos.schema
+" > kerberos.conf 
+mkdir -p /tmp/slapd.d/
+slaptest -f kerberos.conf -F /tmp/slapd.d/
+cp "/tmp/slapd.d/cn=config/cn=schema/cn={4}kerberos.ldif" \
+ "/etc/ldap/slapd.d/cn=config/cn=schema"
+chown openldap: "/etc/ldap/slapd.d/cn=config/cn=schema/cn={4}kerberos.ldif"
+/etc/init.d/slapd stop
+/etc/init.d/slapd start
+\end{verbatim}
+\item Modify the openldap ACLs creating the LDIF file below and injecting it into openldap with the ldapmodify command:
+\begin{verbatim}
+--------------acl.ldif--------
+dn: olcDatabase={1}hdb,cn=config
+replace: olcAccess
+olcAccess: to attrs=userPassword,shadowLastChange,krbPrincipalKey 
+ by dn="cn=admin,dc=example,dc=foo" write 
+ by anonymous auth 
+ by self write 
+ by * none
+-
+add: olcAccess
+olcAccess: to dn.base="" by * read
+-
+add: olcAccess
+olcAccess: to * by dn="cn=admin,dc=example,dc=foo" write by * read
+----------------------
+
+ldapmodify -Y EXTERNAL -H ldapi:/// -f acl.ldif
+\end{verbatim}
+
+\item Create an index on krb5principalname creating the LDIF file below and injecting it into openldap with the ldapmodify command:
+\begin{verbatim}
+--------------indexes.ldif-----------------------
+dn: olcDatabase={1}hdb,cn=config
+add: olcDbIndex
+olcDbIndex: krbPrincipalName eq,pres,sub
+------------------------------------------------
+ldapmodify -Y EXTERNAL -H ldapi:/// -f indexes.ldif
+\end{verbatim}
+
+
+\item Populate your openldap directory creating the LDIF file below and injecting it into openldap with the ldapmodify command:
+\begin{verbatim}
+-----------------------------------user.ldif---------------------------------
+dn: dc=example,dc=foo
+changetype: add
+dc: example
+description: Example Companyfoo
+objectClass: dcObject
+objectClass: organization
+o: Example, Inc.
+
+dn: cn=Users,dc=example,dc=foo
+changetype: add
+cn: Users
+objectClass: organizationalRole
+description: Default container for upgraded user accounts
+
+dn: cn=foouser0,cn=Users,dc=example,dc=foo
+changetype: add
+uid: foouser0
+cn: foouser0
+givenName: foouser0
+sn: foouser0
+telephoneNumber: +1 888 8888 8888
+mail: foouser0@example.foo
+objectClass: inetOrgPerson
+objectClass: organizationalPerson
+objectClass: person
+objectClass: top
+userPassword: mypass
+---------------------------------------------------------------------------
+ldapmodify -c -x -D "cn=admin,dc=example,dc=foo" \
+ -W  -H ldap://10.69.69.200 -f user.ldif
+\end{verbatim}
+
+
+
+
+\item Install the  MIT kerberos packages:
+\begin{verbatim}
+apt-get install krb5-kdc krb5-kdc-ldap
+\end{verbatim}
+
+\item Configure the KDC using the server's /etc/krb5.conf file: we use the openldap\_ldapconf module and the KDC will connect to the openldap server on the same machine: ldap:///
+\begin{verbatim}
+[libdefaults]
+	default_realm = EXAMPLE.FOO
+	forwardable = true
+	proxiable = true
+
+[realms]
+        EXAMPLE.FOO = {
+                kdc = 10.69.69.200
+                admin_server = 10.69.69.200
+                default_domain = example.foo
+                database_module = openldap_ldapconf
+        }
+
+[domain_realm]
+	.example.foo = EXAMPLE.FOO
+
+[login]
+	krb4_convert = true
+	krb4_get_tickets = false
+
+[dbdefaults]
+        ldap_kerberos_container_dn = dc=example,dc=foo
+
+[dbmodules]
+        openldap_ldapconf = {
+                db_library = kldap
+                ldap_kdc_dn = "cn=admin,dc=example,dc=foo"
+                ldap_kadmind_dn = "cn=admin,dc=example,dc=foo"
+                ldap_servers = ldap:/// 
+                ldap_conns_per_server = 5
+        }
+\end{verbatim}
+
+\item Remove aes256-cts from the supported\_enctypes or install the ``Java Cryptography Extension (JCE) Unlimited Strength Jurisdiction Policy Files''
+MIT kerberos on Debian comes with aes256 support but Java6 does not. So you either add it to Java or remove it from Linux. We choose here the second option (less secure but faster). MIT kerberos on Debian comes aes256-cts:normal listed as supported types in with /etc/krb5kdc/kdc.conf, remove it so that the line is:
+
+\begin{verbatim}
+supported_enctypes = arcfour-hmac:normal des3-hmac-sha1:normal des-cbc-crc:normal \
+ des:normal des:v4 des:norealm des:onlyrealm des:afs3
+\end{verbatim}
+
+\item Create the realm using the kdb5\_ldap\_util command:
+
+\begin{verbatim}
+kdb5_ldap_util -D  cn=admin,dc=example,dc=foo create \
+ -subtrees dc=example,dc=foo -r EXAMPLE.FOO -s -H ldap://10.69.69.200
+\end{verbatim}
+
+\item Create a stashed password using the kdb5\_ldap\_util command:
+\begin{verbatim}
+kdb5_ldap_util -D  cn=admin,dc=example,dc=foo stashsrvpw \
+ -f /etc/krb5kdc/service.keyfile cn=admin,dc=example,dc=foo
+\end{verbatim}
+\item Create the UPNs with kadmin's  addprinc command: 
+
+\begin{verbatim}
+# kadmin.local
+kadmin.local:  addprinc -x dn="cn=foouser0,cn=Users,dc=example,dc=foo" foouser0
+kadmin.local:  addprinc -x dn="cn=foouser1,cn=Users,dc=example,dc=foo" foouser1
+kadmin.local:  addprinc -x dn="cn=foouser2,cn=Users,dc=example,dc=foo" foouser2
+\end{verbatim}
+
+\item Create the SPNs with kadmin's  addprinc command: 
+
+\begin{verbatim}
+kadmin.local -q "addprinc +allow_forwardable -requires_preauth HTTP/madona"
+kadmin.local -q "addprinc +allow_forwardable -requires_preauth HTTP/madona.example.foo"
+kadmin.local -q "addprinc +allow_forwardable -requires_preauth cifs/madona"
+kadmin.local -q "addprinc +allow_forwardable -requires_preauth cifs/madona.example.foo"
+\end{verbatim}
+
+\item Generate the keytabs  with kadmin's ktadd command: 
+
+\begin{verbatim}
+kadmin.local -q "ktadd  -norandkey -k /tmp/alfrescohttp.keytab2 HTTP/madona.example.foo"
+kadmin.local -q "ktadd  -norandkey -k /tmp/alfrescocifs.keytab2 cifs/madona.example.foo"
+\end{verbatim}
+
+\item Transfer the keytabs to the alfresco server for instance in the /etc/keys directory.
+\item Modify your java security file 'java.login.config':
+\begin{verbatim}
+/usr/local/jdk1.6.0_26/jre/lib/security/java.login.config
+\end{verbatim}
+to have:
+\begin{verbatim}
+Alfresco {
+   com.sun.security.auth.module.Krb5LoginModule sufficient;
+};
+
+AlfrescoCIFS {
+   com.sun.security.auth.module.Krb5LoginModule required
+   keyTab="/etc/keys/alfrescocifs.keytab2"
+   principal="cifs/madona.example.foo"
+   doNotPrompt=true
+   refreshKrb5Config=true
+   useTicketCache=true
+   renewTGT=true
+   useKeyTab=true
+   storeKey=true
+   isInitiator=true;
+};
+
+AlfrescoHTTP {
+   com.sun.security.auth.module.Krb5LoginModule required
+   keyTab="/etc/keys/alfrescohttp.keytab2"
+   principal="HTTP/madona.example.foo"
+   doNotPrompt=true
+   refreshKrb5Config=true
+   useTicketCache=true
+   renewTGT=true
+   useKeyTab=true
+   storeKey=true
+   isInitiator=true;
+};
+
+ShareHTTP {
+   com.sun.security.auth.module.Krb5LoginModule required
+   storeKey=true
+   useKeyTab=true
+   keyTab="/etc/keys/alfrescohttp.keytab2"
+   principal="HTTP/madona.example.foo";
+};
+
+com.sun.net.ssl.client {
+   com.sun.security.auth.module.Krb5LoginModule sufficient;
+};
+
+other {
+   com.sun.security.auth.module.Krb5LoginModule sufficient;
+};
+\end{verbatim}
+
+\item modify your alfresco-global.properties file:
+\begin{verbatim}
+authentication.chain=kerberos1:kerberos
+kerberos.authentication.realm=EXAMPLE.FOO
+kerberos.authentication.authenticateCIFS=true
+kerberos.authentication.cifs.password=mypass
+kerberos.authentication.http.password=mypass
+kerberos.authentication.sso.enabled=true
+kerberos.authentication.defaultAdministratorUserNames=administrator
+\end{verbatim}
+\item Edit your /etc/krb5.conf on the client side:
+\begin{verbatim}
+[libdefaults]
+default_realm = EXAMPLE.FOO
+default_tkt_enctypes = rc4-hmac
+default_tgs_enctypes = rc4-hmac
+permitted_enctypes= rc4-hmac
+forwardable = true
+
+[realms]
+EXAMPLE.FOO = {
+  kdc = 10.69.69.200
+  admin_server = 10.69.69.200
+ }
+[domain_realm]
+	.example.foo = EXAMPLE.FOO
+\end{verbatim}
+\item start Alfresco
+
+\item in a shell, get a kerberos ticket
+\begin{verbatim}
+kinit foouser0
+\end{verbatim}
+\item launch firefox and in about:config, set the variable
+
+\begin{verbatim}
+network.negotiate-auth.trusted-uris
+\end{verbatim}
+to:
+\begin{verbatim}
+http://madona:8080/alfresco
+\end{verbatim}
+\item go to URL http://madona:8080/alfresco and confirm you are logged in without being prompted to authenticate.
+
+\end{enumerate}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Setting up Openldap}
+In this section we detail the necessary steps to modify the openldap server to make it ready to become a MIT KDC backend.
+It involves modifying the LDAP schema, modifying the ACLs and creating a krb5principalname.
+\subsection{Install the openldap program}
+\begin{verbatim}
+apt-get install slapd
+dpkg-reconfigure slapd
+\end{verbatim}
+and answer the domain and password questions with:
+\begin{verbatim}
+example.foo
+mypass
+\end{verbatim}
+respectively.
+
+\subsection{Modify the openldap schema}
+To use openldap as a backend for a kerberos KDC, you need to extend its schema.
+The schema to be used is packaged with the  krb5-kdc-ldap package.
+\begin{verbatim}
+apt-get install krb5-kdc-ldap
+zcat /usr/share/doc/krb5-kdc-ldap/kerberos.schema.gz > /etc/ldap/schema/kerberos.schema
+\end{verbatim}
+
+Obtain the list of currently use schema files in your openldap server:
+
+\begin{verbatim}
+root@debkrb5:~# ldapsearch -LLL -Y EXTERNAL -H ldapi:/// -b cn=config dn| grep schema
+SASL/EXTERNAL authentication started
+SASL username: gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth
+SASL SSF: 0
+dn: cn=schema,cn=config
+dn: cn={0}core,cn=schema,cn=config
+dn: cn={1}cosine,cn=schema,cn=config
+dn: cn={2}nis,cn=schema,cn=config
+dn: cn={3}inetorgperson,cn=schema,cn=config
+\end{verbatim}
+
+Create a text file that list the currently used schema files, in the same order appending the kerberos schema file;
+\begin{verbatim}
+echo "
+include          /etc/ldap/schema/core.schema
+include          /etc/ldap/schema/cosine.schema
+include          /etc/ldap/schema/nis.schema
+include          /etc/ldap/schema/inetorgperson.schema
+include          /etc/ldap/schema/kerberos.schema
+" > kerberos.conf 
+\end{verbatim}
+Then use the slaptest tool to generate a configuration file:
+\begin{verbatim}
+mkdir -p /tmp/slapd.d/
+slaptest -f kerberos.conf -F /tmp/slapd.d/
+cp "/tmp/slapd.d/cn=config/cn=schema/cn={4}kerberos.ldif" \
+ "/etc/ldap/slapd.d/cn=config/cn=schema"
+chown openldap: "/etc/ldap/slapd.d/cn=config/cn=schema/cn={4}kerberos.ldif"
+\end{verbatim}
+Restart the openldap daemon, and check you can connect.
+\begin{verbatim}
+/etc/init.d/slapd stop
+/etc/init.d/slapd start
+\end{verbatim}
+
+Confirm that you now see the kerberos schema within your openldap server:
+
+\begin{verbatim}
+root@debkrb5:~#  ldapsearch -LLL -Y EXTERNAL -H ldapi:/// -b cn=config dn| grep schema
+SASL/EXTERNAL authentication started
+SASL username: gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth
+SASL SSF: 0
+dn: cn=schema,cn=config
+dn: cn={0}core,cn=schema,cn=config
+dn: cn={1}cosine,cn=schema,cn=config
+dn: cn={2}nis,cn=schema,cn=config
+dn: cn={3}inetorgperson,cn=schema,cn=config
+dn: cn={4}kerberos,cn=schema,cn=config
+\end{verbatim}
+
+\subsection{Modify the openldap ACLs}
+Obtain the currently used ACLs looking at the olcAccess in 'dn: olcDatabase={1}hdb,cn=config':
+\begin{verbatim}
+root@debkrb5:~#  ldapsearch -LLL -Y EXTERNAL -H ldapi:/// -b 'olcDatabase={1}hdb,cn=config'
+SASL/EXTERNAL authentication started
+SASL username: gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth
+SASL SSF: 0
+dn: olcDatabase={1}hdb,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcHdbConfig
+olcDatabase: {1}hdb
+olcDbDirectory: /var/lib/ldap
+olcSuffix: dc=example,dc=foo
+olcAccess: {0}to attrs=userPassword,shadowLastChange by self write by anonymou
+ s auth by dn="cn=admin,dc=example,dc=foo" write by * none
+olcAccess: {1}to dn.base="" by * read
+olcAccess: {2}to * by self write by dn="cn=admin,dc=example,dc=foo" write by *
+  read
+olcLastMod: TRUE
+olcRootDN: cn=admin,dc=example,dc=foo
+olcRootPW: {SSHA}4xWFHJSKDwZER+Qvg3nWfKaTZnADSwGO
+olcDbCheckpoint: 512 30
+olcDbConfig: {0}set_cachesize 0 2097152 0
+olcDbConfig: {1}set_lk_max_objects 1500
+olcDbConfig: {2}set_lk_max_locks 1500
+olcDbConfig: {3}set_lk_max_lockers 1500
+olcDbIndex: objectClass eq
+\end{verbatim}
+Create the LDIF file below:
+\begin{verbatim}
+--------------acl.ldif--------
+dn: olcDatabase={1}hdb,cn=config
+replace: olcAccess
+olcAccess: to attrs=userPassword,shadowLastChange,krbPrincipalKey 
+ by dn="cn=admin,dc=example,dc=foo" write 
+ by anonymous auth 
+ by self write 
+ by * none
+-
+add: olcAccess
+olcAccess: to dn.base="" by * read
+-
+add: olcAccess
+olcAccess: to * by dn="cn=admin,dc=example,dc=foo" write by * read
+----------------------
+\end{verbatim}
+and inject it into the openldap server:
+\begin{verbatim}
+ldapmodify -Y EXTERNAL -H ldapi:/// -f acl.ldif
+\end{verbatim}
+Confirm that the ACL change has been taken into account usin the  ldapsearch program:
+\begin{verbatim}
+ldapsearch -LLL -Y EXTERNAL -H ldapi:/// -b 'olcDatabase={1}hdb,cn=config' olcAccess
+
+dn: olcDatabase={1}hdb,cn=config
+olcAccess: {0}to attrs=userPassword,shadowLastChange,krbPrincipalKey by dn="cn
+ =admin,dc=example,dc=foo" write by anonymous auth by self write by * none
+olcAccess: {1}to dn.base="" by * read
+olcAccess: {2}to * by dn="cn=admin,dc=example,dc=foo" write by * read
+\end{verbatim}
+
+
+
+\subsection{Create an index on krb5principalname}
+
+Get the current list of indexes you have in your openldap directory using the ldapsearch program:
+
+\begin{verbatim}
+ldapsearch -LLL -Y EXTERNAL -H ldapi:/// -b 'olcDatabase={1}hdb,cn=config' olcDbIndex
+dn: olcDatabase={1}hdb,cn=config
+olcDbIndex: objectClass eq
+\end{verbatim}
+
+Create the LDIF text file below:
+\begin{verbatim}
+--------------indexes.ldif-----------------------
+dn: olcDatabase={1}hdb,cn=config
+add: olcDbIndex
+olcDbIndex: krbPrincipalName eq,pres,sub
+------------------------------------------------
+\end{verbatim}
+
+And inject it into the openldap server using the ldapmodify program:
+\begin{verbatim}
+ldapmodify -Y EXTERNAL -H ldapi:/// -f indexes.ldif
+\end{verbatim}
+Confirm that the attribute krbPrincipalName is now indexed:
+\begin{verbatim}
+ldapsearch -LLL -Y EXTERNAL -H ldapi:/// -b 'olcDatabase={1}hdb,cn=config' olcDbIndex
+dn: olcDatabase={1}hdb,cn=config
+olcDbIndex: objectClass eq
+olcDbIndex: krbPrincipalName eq,pres,sub
+\end{verbatim}
+
+
+\subsection{Populate your openldap directory}
+
+Perhaps the best way to fill your LDAP diretcory with some user is to first generate a LDIF file, and then inject it into your directory.
+The LDIF file I use looks like this:
+
+\begin{verbatim}
+---------------------------------user.ldif-----------------------------------
+dn: dc=example,dc=foo
+changetype: add
+dc: example
+description: Example Companyfoo
+objectClass: dcObject
+objectClass: organization
+o: Example, Inc.
+
+dn: cn=Users,dc=example,dc=foo
+changetype: add
+cn: Users
+objectClass: organizationalRole
+description: Default container for upgraded user accounts
+
+dn: cn=foouser0,cn=Users,dc=example,dc=foo
+changetype: add
+uid: foouser0
+cn: foouser0
+givenName: foouser0
+sn: foouser0
+telephoneNumber: +1 888 8888 8888
+mail: foouser0@example.foo
+objectClass: inetOrgPerson
+objectClass: organizationalPerson
+objectClass: person
+objectClass: top
+userPassword: mypass
+
+dn: cn=foouser1,cn=Users,dc=example,dc=foo
+changetype: add
+uid: foouser1
+cn: foouser1
+givenName: foouser1
+sn: foouser1
+telephoneNumber: +1 888 8888 8888
+mail: foouser1@example.foo
+objectClass: inetOrgPerson
+objectClass: organizationalPerson
+objectClass: person
+objectClass: top
+userPassword: mypass
+\end{verbatim}
+
+and inject it into your LDAP directory using:
+
+\begin{verbatim}
+ldapmodify -c -x -D "cn=admin,dc=example,dc=foo" -W  -H ldap://10.69.69.200 -f user.ldif
+\end{verbatim}
+
+Note that the passwords are here stored in plain text. You probably want to store them encrypted (hashed) in a production setup\footnote{In the Ubuntu guide \cite{ubuntu1}, you can read that ``It is also required to configure OpenLDAP for TLS and SSL connections''.
+In fact MIT kerberos will be able to communicate with the openldap backend, even if laps is not used. You can use other protocols like ldap and ldapi.
+The MIT kerberos documentation recommends the use of ldapi or ldaps.}
+
+\section{Setting up the KDC}
+\subsection{Installing the MIT kerberos software}
+Install the MIT Kerberos software:
+\begin{verbatim}
+apt-get install krb5-kdc krb5-kdc-ldap
+\end{verbatim}
+
+Configure the KDC using the server's /etc/krb5.conf file: we use the openldap\_ldapconf module and the KDC will connect to the openldap server on the same machine: ldap:///
+
+The KDC configuration can also be shared into two files: /etc/krb5.conf and /etc/krb5kdc/kdc.conf 
+In fact both files are parsed and some sections can be moved from the  /etc/krb5.conf file (which is also used by the kerberos clients) to the /etc/krb5kdc/kdc.conf (which is only used by the kerberos server).
+\begin{verbatim}
+[libdefaults]
+	default_realm = EXAMPLE.FOO
+	forwardable = true
+	proxiable = true
+
+[realms]
+        EXAMPLE.FOO = {
+                kdc = 10.69.69.200
+                admin_server = 10.69.69.200
+                default_domain = example.foo
+                database_module = openldap_ldapconf
+        }
+
+[domain_realm]
+	.example.foo = EXAMPLE.FOO
+
+[login]
+	krb4_convert = true
+	krb4_get_tickets = false
+
+[dbdefaults]
+        ldap_kerberos_container_dn = dc=example,dc=foo
+
+[dbmodules]
+        openldap_ldapconf = {
+                db_library = kldap
+                ldap_kdc_dn = "cn=admin,dc=example,dc=foo"
+                ldap_kadmind_dn = "cn=admin,dc=example,dc=foo"
+                ldap_servers = ldap:/// 
+                ldap_conns_per_server = 5
+        }
+\end{verbatim}
+Here we chose ldap\_servers = ldap:/// that means that the KDC will communicate with the openldap backedn using the LDAP protocol. This allows an easy setup (no SSL certifcate needed) and easy debugging (we can sniff the netwrok traffic to understand what are the ldap requests sent by the KDC to the LDAP server).
+
+\subsection{Remove aes256-cts from the supported\_enctypes}
+MIT kerberos on Debian comes aes256-cts:normal listed as supported types in with /etc/krb5kdc/kdc.conf; remove it so that the line is:
+As mentioned in Jira \footnote{See Jira ALF-6371}, Java has a limitation in terms of cipher supported. You can either change your Java configuration to add support for the aes256-cts cipher or tell the KDC not to sue the cipher. 
+
+We choose the second option as it is simpler to implement. The supported\_enctypes should now read:
+\begin{verbatim}
+supported_enctypes = arcfour-hmac:normal des3-hmac-sha1:normal des-cbc-crc:normal des:normal des:v4 des:norealm des:onlyrealm des:afs3
+\end{verbatim}
+
+and the whole /etc/krb5kdc/kdc.conf file should read:
+
+\begin{verbatim}
+----------/etc/krb5kdc/kdc.conf--------------
+[kdcdefaults]
+    kdc_ports = 750,88
+
+[realms]
+    EXAMPLE.FOO = {
+        database_name = /var/lib/krb5kdc/principal
+        admin_keytab = FILE:/etc/krb5kdc/kadm5.keytab
+        acl_file = /etc/krb5kdc/kadm5.acl
+        key_stash_file = /etc/krb5kdc/stash
+        kdc_ports = 750,88
+        max_life = 10h 0m 0s
+        max_renewable_life = 7d 0h 0m 0s
+        master_key_type = des3-hmac-sha1
+     	supported_enctypes = arcfour-hmac:normal des3-hmac-sha1:normal des-cbc-crc:normal des:normal des:v4 des:norealm des:onlyrealm des:afs3
+        default_principal_flags = +preauth
+    }
+
+\end{verbatim}
+
+If you leave the cipher aes256-cts:normal in the list of supported\_enctypes, then your KDC will issue tickets to thye clients encoded with that cipher:
+
+
+\begin{verbatim}
+klist -ef
+Ticket cache: FILE:/tmp/krb5cc_1000
+Default principal: foouser2@EXAMPLE.FOO
+
+Valid starting    Expires           Service principal
+28/02/2013 17:18  01/03/2013 03:18  krbtgt/EXAMPLE.FOO@EXAMPLE.FOO
+	renew until 01/03/2013 17:18, Flags: FRIA
+	Etype (skey, tkt): arcfour-hmac, aes256-cts-hmac-sha1-96 
+28/02/2013 17:19  01/03/2013 03:18  HTTP/madona@
+	renew until 01/03/2013 17:18, Flags: FRAT
+	Etype (skey, tkt): arcfour-hmac, aes256-cts-hmac-sha1-96 
+28/02/2013 17:19  01/03/2013 03:18  HTTP/madona@EXAMPLE.FOO
+	renew until 01/03/2013 17:18, Flags: FRAT
+	Etype (skey, tkt): arcfour-hmac, aes256-cts-hmac-sha1-96 
+\end{verbatim}
+
+and in the alfresco logs you will see encryption type errors:
+
+\begin{verbatim}
+2013-02-28 16:54:15,172  ERROR [org.alfresco.fileserver] [http-8080-1] Error from JLAN
+ GSSException: Failure unspecified at GSS-API level (Mechanism level: Encryption type AES256 CTS mode with HMAC SHA1-96 is not supported/enabled)
+	at sun.security.jgss.krb5.Krb5Context.acceptSecContext(Krb5Context.java:741)
+	at sun.security.jgss.GSSContextImpl.acceptSecContext(GSSContextImpl.java:323)
+	at sun.security.jgss.GSSContextImpl.acceptSecContext(GSSContextImpl.java:267)
+	at org.alfresco.jlan.server.auth.kerberos.SessionSetupPrivilegedAction.run(SessionSetupPrivilegedAction.java:102)
+\end{verbatim}
+See ALF-6371 and http://docs.oracle.com/javase/6/docs/technotes/guides/security/jgss/jgss-features.html
+See http://www.ngs.ac.uk/tools/jcepolicyfiles for more information on ``Java Cryptography Extension (JCE) Unlimited Strength Jurisdiction Policy Files''
+% [4:33:59 PM] Romain Guinot: c'etait une histoire d'export policy unlimited oui
+% [4:34:17 PM] Alex Madon: ca veut dire quoi?
+% [4:34:53 PM] Romain Guinot: y'avait des jars ou des fichiers de conf a configurer pour lever les restrictions sur les algorithmes que tu peux utiliser dans ta JVM locale
+% [4:35:18 PM] Alex Madon: tu as un lien sur comment faire en pratique?
+% [4:35:46 PM] Romain Guinot: http://www.oracle.com/technetwork/java/javase/downloads/jce-6-download-429243.html
+% [4:35:50 PM] Romain Guinot: pour le download
+% [4:36:03 PM] Romain Guinot: http://www.ngs.ac.uk/tools/jcepolicyfiles par exemple pour les instructions
+% [4:36:27 PM] Alex Madon: ah cool, oui ca y est ca me revient maintenant
+% [4:36:38 PM] Alex Madon: sur le link de download il faut accepter la licence ;)
+% [4:36:51 PM] Romain Guinot: oui, comme pour downloader le JDK de toute facon :)
+% [4:37:24 PM] Alex Madon: mais pourquoi ils ne le mettent pas par default?
+% [4:37:56 PM] Romain Guinot: je crois que c'est du a des restrictions à l'export placées par l'administration US
+
+
+\subsection{Create the realm}
+Using the kdb5\_ldap\_util program which is part of the krb5-kdc-ldap package, create a realm:
+\begin{verbatim}
+kdb5_ldap_util -D  cn=admin,dc=example,dc=foo create -subtrees dc=example,dc=foo -r EXAMPLE.FOO -s -H ldap://10.69.69.200
+\end{verbatim}
+You are then asked for the DN password and then the database Master password:
+\begin{verbatim}
+# kdb5_ldap_util -D  cn=admin,dc=example,dc=foo create -subtrees dc=example,dc=foo -r EXAMPLE.FOO -s -H ldap://10.69.69.200
+Password for "cn=admin,dc=example,dc=foo": 
+Initializing database for realm 'EXAMPLE.FOO'
+You will be prompted for the database Master Password.
+It is important that you NOT FORGET this password.
+Enter KDC database master key: 
+Re-enter KDC database master key to verify: 
+\end{verbatim}
+
+
+If you make a mistake, you can destroy the realm you just created and re-create it; 
+\begin{verbatim}
+root@debkrb5:~# kdb5_ldap_util -D cn=admin,dc=example,dc=foo -H ldapi:/// destroy -f
+Password for "cn=admin,dc=example,dc=foo": 
+** Database of 'EXAMPLE.FOO' destroyed.
+\end{verbatim}
+
+
+\subsection{Create a stashed password}
+Create a stash of the password used to bind to the LDAP server. This password is used by the ldap\_kdc\_dn and ldap\_kadmin\_dn options in /etc/krb5.conf:
+\begin{verbatim}
+kdb5_ldap_util -D  cn=admin,dc=example,dc=foo stashsrvpw -f /etc/krb5kdc/service.keyfile cn=admin,dc=example,dc=foo
+\end{verbatim}
+The stashed password file is basically a file containing one DN and password pair on each line:
+\begin{verbatim}
+root@debkrb5:~# more /etc/krb5kdc/service.keyfile
+cn=admin,dc=example,dc=foo#{HEX}6d7970617373
+\end{verbatim}
+
+\subsection{Creating the UPNs}
+You need to create User Principals for each of you users in LDAP that need to use the KDC.
+
+\begin{verbatim}
+kadmin.local
+Authenticating as principal root/admin@EXAMPLE.FOO with password.
+kadmin.local:  addprinc -x dn="cn=foouser0,cn=Users,dc=example,dc=foo" foouser0
+WARNING: no policy specified for foouser0@EXAMPLE.FOO; defaulting to no policy
+Enter password for principal "foouser0@EXAMPLE.FOO": 
+Re-enter password for principal "foouser0@EXAMPLE.FOO": 
+Principal "foouser0@EXAMPLE.FOO" created.
+\end{verbatim}
+
+The -x opption allows you to map a lap DN to a principal name.
+
+You can check the prinpal using the getprinc command:
+\begin{verbatim}
+# kadmin.local -q "getprinc foouser0"
+Authenticating as principal root/admin@EXAMPLE.FOO with password.
+Principal: foouser0@EXAMPLE.FOO
+Expiration date: [never]
+Last password change: Thu Feb 28 19:47:52 GMT 2013
+Password expiration date: [none]
+Maximum ticket life: 0 days 10:00:00
+Maximum renewable life: 7 days 00:00:00
+Last modified: Thu Feb 28 19:47:52 GMT 2013 (root/admin@EXAMPLE.FOO)
+Last successful authentication: Thu Feb 28 20:37:25 GMT 2013
+Last failed authentication: [never]
+Failed password attempts: 0
+Number of keys: 7
+Key: vno 1, arcfour-hmac, Version 5
+Key: vno 1, des3-cbc-sha1, Version 5
+Key: vno 1, des-cbc-crc, Version 5
+Key: vno 1, des-cbc-md5, Version 4
+Key: vno 1, des-cbc-md5, Version 5 - No Realm
+Key: vno 1, des-cbc-md5, Version 5 - Realm Only
+Key: vno 1, des-cbc-md5, AFS version 3
+MKey: vno 1
+Attributes: REQUIRES_PRE_AUTH
+Policy: [none]
+\end{verbatim}
+
+
+% SPN 
+\subsection{Creating the SPNs}
+In a way similar to the Windows configuration, we also need to create four SPNs (Service Principals). On the contrary to UPNs (User Principals) it is not necessary to map them to real users in openldap; the -x option of addprinc is not necessary.
+\begin{verbatim}
+kadmin.local -q "addprinc +allow_forwardable -requires_preauth HTTP/madona"
+kadmin.local -q "addprinc +allow_forwardable -requires_preauth HTTP/madona.example.foo"
+kadmin.local -q "addprinc +allow_forwardable -requires_preauth cifs/madona"
+kadmin.local -q "addprinc +allow_forwardable -requires_preauth cifs/madona.example.foo"
+\end{verbatim}
+
+
+The +allow\_forwardable is necessary if you want to user Alfresco Share.
+The -requires\_preauth is necessary if you observer in /var/log/auth.log errors like thye one below when alfreco boots:
+\begin{verbatim}
+Feb 28 09:23:38 debkrb5 krb5kdc[2546]: AS_REQ (4 etypes {18 17 16 23}) 10.69.69.200: NEEDED_PREAUTH: HTTP/madona.example.foo@EXAMPLE.FOO for krbtgt/EXAMPLE.FOO@EXAMPLE.FOO, Additional pre-authentication required
+\end{verbatim}
+and in the alfresco logs:
+\begin{verbatim}
+>>>KRBError:
+	 cTime is Thu Feb 28 10:48:36 GMT 2013 1362048516000
+	 sTime is Thu Feb 28 10:48:30 GMT 2013 1362048510000
+	 suSec is 70593
+	 error code is 31
+	 error Message is Integrity check on decrypted field failed
+	 crealm is EXAMPLE.FOO
+	 cname is HTTP/madona.example.foo
+	 realm is EXAMPLE.FOO
+	 sname is krbtgt/EXAMPLE.FOO
+	 msgType is 30
+KRBError received: PREAUTH_FAILED
+2013-02-28 10:48:30,073  ERROR [app.servlet.KerberosAuthenticationFilter] [http-8080-1] HTTP Kerberos web filter error
+ javax.security.auth.login.LoginException: Integrity check on decrypted field failed (31) - PREAUTH_FAILED
+	at com.sun.security.auth.module.Krb5LoginModule.attemptAuthentication(Krb5LoginModule.java:696)
+	at com.sun.security.auth.module.Krb5LoginModule.login(Krb5LoginModule.java:542)
+	at sun.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+	at sun.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:39)
+	at sun.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:25)
+\end{verbatim}
+
+Those commands will ask you to enter a password.
+The option -randkey of the addprinc command let the program pick a key.
+\begin{verbatim}
+kadmin.local -q "addprinc -randkey +allow_forwardable -requires_preauth HTTP/madona.example.foo"
+\end{verbatim}
+But currently in Alfresco 4.1.2, the passwords are needed. This is probably a bug and is tracked in Jira ALF-18014.
+If you use the -randkey option of addprinc, then you will get checksum errors when alfresco authenticates users:
+
+
+\begin{verbatim}
+>>> KrbKdcReq send: #bytes read=727
+>>> KdcAccessibility: remove 10.69.69.200
+>>> EType: sun.security.krb5.internal.crypto.ArcFourHmacEType
+Checksum failed !
+\end{verbatim}
+In the future, when ALF-18014, it is likely that it will be possible to use the option -randkey to generate the principals. 
+
+
+
+You can check a Service Princiapl in the same way you check a User Principal:
+
+
+\begin{verbatim}
+kadmin.local -q "getprinc HTTP/madona.example.foo"
+Authenticating as principal root/admin@EXAMPLE.FOO with password.
+Principal: HTTP/madona.example.foo@EXAMPLE.FOO
+Expiration date: [never]
+Last password change: Thu Feb 28 21:20:31 GMT 2013
+Password expiration date: [none]
+Maximum ticket life: 0 days 10:00:00
+Maximum renewable life: 7 days 00:00:00
+Last modified: Thu Feb 28 21:20:31 GMT 2013 (HTTP/admin@EXAMPLE.FOO)
+Last successful authentication: [never]
+Last failed authentication: [never]
+Failed password attempts: 0
+Number of keys: 7
+Key: vno 1, arcfour-hmac, Version 5
+Key: vno 1, des3-cbc-sha1, Version 5
+Key: vno 1, des-cbc-crc, Version 5
+Key: vno 1, des-cbc-md5, Version 4
+Key: vno 1, des-cbc-md5, Version 5 - No Realm
+Key: vno 1, des-cbc-md5, Version 5 - Realm Only
+Key: vno 1, des-cbc-md5, AFS version 3
+MKey: vno 1
+Attributes:
+Policy: [none]
+\end{verbatim}
+
+
+
+% keytabs
+
+\subsection{Generating the keytabs}
+
+\begin{verbatim}
+kadmin.local -q "ktadd  -norandkey -k /tmp/alfrescohttp.keytab2 HTTP/madona.example.foo"
+kadmin.local -q "ktadd  -norandkey -k /tmp/alfrescocifs.keytab2 cifs/madona.example.foo"
+\end{verbatim}
+The -norandkey option tells the ktadd program not to incement the kvno.
+
+test it on the KDC:
+\begin{verbatim}
+kinit -k -t /tmp/alfrescohttp.keytab2 HTTP/madona.example.foo@EXAMPLE.FOO
+kinit -k -t /tmp/alfrescocifs.keytab2 cifs/madona.example.foo@EXAMPLE.FOO
+\end{verbatim}
+You can also list the keys in the keytab using the klist.
+\begin{verbatim}
+root@madona:~# klist -et -k /tmp/alfrescohttp.keytab2
+Keytab name: FILE:/tmp/alfrescohttp.keytab2
+KVNO Timestamp        Principal
+---- ---------------- ---------------------------------------------------------
+   1 28/02/2013 21:05 HTTP/madona.example.foo@EXAMPLE.FOO (arcfour-hmac) 
+   1 28/02/2013 21:05 HTTP/madona.example.foo@EXAMPLE.FOO (des3-cbc-sha1) 
+   1 28/02/2013 21:05 HTTP/madona.example.foo@EXAMPLE.FOO (des-cbc-crc) 
+\end{verbatim}
+
+\section{Alfresco server configuration}
+\subsection{Install the SPN keytabs}
+Copy the keytabs to your alfresco server in the /etc/keys directory.
+You can also list the keys in the keytab using the klist.
+\begin{verbatim}
+root@madona:~# klist -et -k /etc/keys/alfrescohttp.keytab2
+Keytab name: FILE:/etc/keys/alfrescohttp.keytab2
+KVNO Timestamp        Principal
+---- ---------------- ---------------------------------------------------------
+   1 28/02/2013 21:05 HTTP/madona.example.foo@EXAMPLE.FOO (arcfour-hmac) 
+   1 28/02/2013 21:05 HTTP/madona.example.foo@EXAMPLE.FOO (des3-cbc-sha1) 
+   1 28/02/2013 21:05 HTTP/madona.example.foo@EXAMPLE.FOO (des-cbc-crc) 
+\end{verbatim}
+
+\subsection{Tune your Java security}
+
+Modify your java security file 'java.login.config':
+\begin{verbatim}
+/usr/local/jdk1.6.0_26/jre/lib/security/java.login.config
+\end{verbatim}
+to have:
+\begin{verbatim}
+Alfresco {
+   com.sun.security.auth.module.Krb5LoginModule sufficient;
+};
+
+AlfrescoCIFS {
+   com.sun.security.auth.module.Krb5LoginModule required
+   keyTab="/etc/keys/alfrescocifs.keytab2"
+   principal="cifs/madona.example.foo"
+   doNotPrompt=true
+   refreshKrb5Config=true
+   useTicketCache=true
+   renewTGT=true
+   useKeyTab=true
+   storeKey=true
+   isInitiator=true;
+};
+
+AlfrescoHTTP {
+   com.sun.security.auth.module.Krb5LoginModule required
+   keyTab="/etc/keys/alfrescohttp.keytab2"
+   principal="HTTP/madona.example.foo"
+   doNotPrompt=true
+   refreshKrb5Config=true
+   useTicketCache=true
+   renewTGT=true
+   useKeyTab=true
+   storeKey=true
+   isInitiator=true;
+};
+
+ShareHTTP {
+   com.sun.security.auth.module.Krb5LoginModule required
+   storeKey=true
+   useKeyTab=true
+   keyTab="/etc/keys/alfrescohttp.keytab2"
+   principal="HTTP/madona.example.foo";
+};
+
+com.sun.net.ssl.client {
+   com.sun.security.auth.module.Krb5LoginModule sufficient;
+};
+
+other {
+   com.sun.security.auth.module.Krb5LoginModule sufficient;
+};
+\end{verbatim}
+
+\subsection{Set your alfresco kerberos options using /etc/krb5.conf}
+
+Edit your /etc/krb5.conf on the client side:
+
+\begin{verbatim}
+[libdefaults]
+default_realm = EXAMPLE.FOO
+default_tkt_enctypes = rc4-hmac
+default_tgs_enctypes = rc4-hmac
+permitted_enctypes= rc4-hmac
+forwardable = true
+
+[realms]
+EXAMPLE.FOO = {
+  kdc = 10.69.69.200
+  admin_server = 10.69.69.200
+ }
+[domain_realm]
+	.example.foo = EXAMPLE.FOO
+\end{verbatim}
+
+
+\subsection{Configure Alfresco global properties}
+
+Modify your alfresco-global.properties file:
+\begin{verbatim}
+authentication.chain=kerberos1:kerberos
+kerberos.authentication.realm=EXAMPLE.FOO
+kerberos.authentication.authenticateCIFS=true
+kerberos.authentication.cifs.password=mypass
+kerberos.authentication.http.password=mypass
+kerberos.authentication.sso.enabled=true
+kerberos.authentication.defaultAdministratorUserNames=administrator
+\end{verbatim}
+
+
+
+
+You should now be ready to start Alfresco and test kerberos authentication with a client.
+
+\section{Client configuration and testing authentication}
+
+\subsection{Set your client kerberos options using /etc/krb5.conf}
+
+Edit your /etc/krb5.conf on the client side. In our case we test with the client being the alfreco server itself, but that can easily be done on any linux client:
+
+
+\begin{verbatim}
+[libdefaults]
+default_realm = EXAMPLE.FOO
+default_tkt_enctypes = rc4-hmac
+default_tgs_enctypes = rc4-hmac
+permitted_enctypes= rc4-hmac
+forwardable = true
+
+[realms]
+EXAMPLE.FOO = {
+  kdc = 10.69.69.200
+  admin_server = 10.69.69.200
+ }
+[domain_realm]
+	.example.foo = EXAMPLE.FOO
+\end{verbatim}
+
+\subsection{Authenticate and confirm SSO works}
+in a shell, get a kerberos ticket
+\begin{verbatim}
+kinit foouser0
+\end{verbatim}
+This will prompt for the user password:
+\begin{verbatim}
+madon@madona:~$ kinit foouser0
+Password for foouser0@EXAMPLE.FOO: 
+\end{verbatim}
+You can check the TGT is now set and get the flags of the ticket with the -f option of klist and the encryption used with the -e option:
+\begin{verbatim}
+madon@madona:~$ klist -ef
+Ticket cache: FILE:/tmp/krb5cc_1000
+Default principal: foouser0@EXAMPLE.FOO
+
+Valid starting    Expires           Service principal
+01/03/2013 18:54  02/03/2013 04:54  krbtgt/EXAMPLE.FOO@EXAMPLE.FOO
+	renew until 02/03/2013 18:54, Flags: FRIA
+	Etype (skey, tkt): arcfour-hmac, arcfour-hmac 
+\end{verbatim}
+The F in FRIA means the ticket is Forwardable.
+
+
+Launch firefox and in about:config, set the variable
+
+\begin{verbatim}
+network.negotiate-auth.trusted-uris
+\end{verbatim}
+to:
+\begin{verbatim}
+http://madona:8080/alfresco
+\end{verbatim}
+
+
+Go to URL http://madona:8080/alfresco and confirm you are logged in without being prompted to authenticate.
+
+
+
+\begin{thebibliography}{9}
+
+\bibitem{dnssrv}
+http://tools.ietf.org/id/draft-ietf-krb-wg-krb-dns-locate-02.txt
+http://technet.microsoft.com/en-us/library/cc961719.aspx
+http://web.mit.edu/kerberos/krb5-1.5/krb5-1.5.4/doc/krb5-admin/Hostnames-for-KDCs.html
+
+\bibitem{ubuntu1}
+https://help.ubuntu.com/10.04/serverguide/kerberos-ldap.html
+
+ \end{thebibliography}
+
+\end{document}
