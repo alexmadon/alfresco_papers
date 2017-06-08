@@ -1,7 +1,14 @@
 # alfresco_papers
 
- Some Alfresco related papers I wrote while Francis K was our manager. 
- 
+Some Alfresco related papers I wrote while Francis K was our manager. 
+
+
+Those papers are written in LaTeX. To generate a pdf output, it should be as simple as changing directory to the paper's directory, look for a file ending with '.tex' e.g file.tex and type:
+
+```shell
+pdflatex file.tex
+```
+
 ## capacity_planning 	
 
 Capacity planning paper:
@@ -21,3 +28,4 @@ Alfresco kerberos authentication is only supported when the KDC is Active Direct
 
 Websphere fast install using the jython scripting language of WAS.
 Or how to create a test websphere setup in one command.
+
